@@ -1,0 +1,70 @@
+workflow: staff_assistant
+description: >
+  Orchestrator for the Staff Dashboard / Staff Login surface. Mirrors
+  fan_assistant.yaml but gates every step behind staff authentication and
+  exposes operational tools (crowd analysis, incident logging) that must
+  never reach the fan-facing AI Chat.
+trigger:
+  source: Staff Dashboard
+  on: message_received
+  requires_auth: staff_role
+
+inputs:
+  message: string
+  staff_session:
+    staff_id: string
+    zone_assignment: optional
+
+steps:
+  - id: verify_auth
+    type: auth_check
+    role_required: staff
+    on_fail:
+      type: direct_reply
+      content: "This tool is for authenticated staff sessions only."
+      halt: true
+
+  - id: classify_intent
+    type: intent_classifier
+    input: "{{ message }}"
+    labels: [crowd_status, incident_log, gate_status, lookup, emergency]
+    priority_override:
+      - if: "contains_distress_or_safety_language(message)"
+        force_label: emergency
+
+  - id: route
+    type: branch
+    on: "{{ classify_intent.label }}"
+    branches:
+      crowd_status:
+        call_workflow: crowd_analysis
+        pass: [staff_session.zone_assignment]
+      gate_status:
+        call_workflow: crowd_analysis
+        pass: [staff_session.zone_assignment]
+      incident_log:
+        skill: staff
+        action: log_incident
+        pass: [message, staff_session]
+      lookup:
+        skill: staff
+        action: map_lookup
+        pass: [message]
+      emergency:
+        call_workflow: emergency_flow
+        pass: [message, staff_session]
+        note: staff can also trigger emergency_flow directly to log + notify
+
+  - id: confirm_write_actions
+    type: confirmation
+    condition: "classify_intent.label == 'incident_log'"
+    content: "Logged: {{ route.output.summary }} — anything else to add?"
+
+outputs:
+  reply: "{{ route.output }}"
+
+guardrails:
+  - never expose raw incident logs or live crowd numbers to a non-staff session
+  - all writes (incident_log) must be confirmed back to the staff member
+  - fall back to crowd_analysis's "feed unavailable" notice rather than
+    estimating numbers

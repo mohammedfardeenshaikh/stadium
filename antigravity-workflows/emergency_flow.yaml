@@ -1,0 +1,59 @@
+workflow: emergency_flow
+description: >
+  Highest-priority workflow. Triggered directly by fan_assistant.yaml
+  whenever emergency intent is detected. Optimized for speed: no
+  multi-turn clarification before the first actionable instruction.
+trigger:
+  called_by: fan_assistant
+  priority: critical
+
+inputs:
+  message: string
+  session:
+    current_location: optional
+
+data:
+  map: data/plaza_level_map.json
+
+steps:
+  - id: classify_emergency_type
+    type: intent_classifier
+    labels: [medical, lost_person, security_concern, weather_or_hold, unclear]
+    input: "{{ message }}"
+
+  - id: locate_nearest_help
+    type: lookup
+    from: "{{ data.map.amenities }}"
+    filter_by_type:
+      medical: [nursing_station, guest_services]
+      lost_person: [guest_services]
+      security_concern: [guest_services]
+      weather_or_hold: []  # relay official guidance, not map lookup
+    origin: "{{ session.current_location }}"
+    rank: nearest_first
+
+  - id: apply_emergency_skill
+    skill: emergency
+    input:
+      emergency_type: "{{ classify_emergency_type.label }}"
+      nearest_help: "{{ locate_nearest_help.output }}"
+      message: "{{ message }}"
+
+  - id: escalate_to_staff
+    type: notify
+    condition: "classify_emergency_type.label in [medical, lost_person, security_concern]"
+    target: nearest_staff_channel
+    payload:
+      type: "{{ classify_emergency_type.label }}"
+      approx_location: "{{ session.current_location | default: 'unknown, ask fan' }}"
+    note: >
+      This notification is best-effort situational awareness for staff;
+      it does not replace the fan being told to flag on-site staff directly.
+
+outputs:
+  reply: "{{ apply_emergency_skill.output }}"
+
+behavior_rules:
+  - never delay the first actionable instruction behind a clarifying question
+  - always include "flag any staff member" as a parallel option
+  - for weather_or_hold, relay only official venue guidance, no speculation

@@ -1,0 +1,68 @@
+workflow: navigation_flow
+description: >
+  Resolves any wayfinding request into a concrete direction, using the
+  Plaza Level map data as ground truth. Called by fan_assistant.yaml and
+  reusable by recommendation_flow.yaml whenever a suggestion needs
+  directions attached.
+
+inputs:
+  message: string
+  session:
+    current_location: optional
+    accessibility_needs: optional
+
+data:
+  map: data/plaza_level_map.json
+
+steps:
+  - id: resolve_origin
+    type: entity_extract
+    from: "{{ message }}"
+    schema:
+      origin_type: [gate, section, landmark, unknown]
+      origin_value: string
+    fallback:
+      - if: session.current_location is set
+        use: session.current_location
+      - else:
+        type: clarify
+        ask: "Which gate or section are you closest to right now?"
+        max_questions: 1
+
+  - id: resolve_destination
+    type: entity_extract
+    from: "{{ message }}"
+    schema:
+      destination_type: [amenity, section, landmark]
+      amenity_type: [restroom, family_restroom, retail_location,
+                     water_fountain, charging_station, reverse_atm,
+                     guest_services, bag_check_trailer, nursing_station,
+                     elevator, escalator, stairs, to_rail_station]
+      destination_value: string
+
+  - id: apply_navigation_skill
+    skill: navigation
+    input:
+      origin: "{{ resolve_origin.output }}"
+      destination: "{{ resolve_destination.output }}"
+      map_data: "{{ data.map }}"
+      accessibility_needs: "{{ session.accessibility_needs }}"
+
+  - id: rank_and_format
+    type: transform
+    rules:
+      - rank candidates by same-side-of-bowl proximity first
+      - prefer ramp/elevator routing if accessibility_needs is set
+      - cap response to 2-3 sentences
+      - include one fallback alternative if destination is a
+        high-traffic amenity type (restroom, elevator)
+
+outputs:
+  reply: "{{ rank_and_format.output }}"
+
+error_handling:
+  - if: destination not found in map_data
+    type: direct_reply
+    content: >
+      I don't have that mapped on the Plaza Level — try Guest Services
+      near MetLife West Hall and they can point you the rest of the way.

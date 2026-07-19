@@ -1,0 +1,53 @@
+workflow: recommendation_flow
+description: >
+  Produces short, location-aware suggestions (food/merch/things to do)
+  and hands off to navigation_flow for the actual directions so the two
+  never drift out of sync.
+
+inputs:
+  message: string
+  session:
+    current_location: optional
+    fan_profile: optional
+
+data:
+  map: data/plaza_level_map.json
+
+steps:
+  - id: classify_request
+    type: intent_classifier
+    labels: [food, merch, activity, general]
+    input: "{{ message }}"
+
+  - id: gather_candidates
+    type: lookup
+    from: "{{ data.map.landmarks }}"
+    filter_by_type:
+      food: [retail_hub]        # East Hall / MetLife West Hall, food framed generically
+      merch: [retail_hub]
+      activity: [retail_hub, vip_entrance, club]
+      general: [retail_hub, club]
+    origin: "{{ session.current_location }}"
+    rank: nearest_first
+    limit: 3
+
+  - id: apply_recommendation_skill
+    skill: recommendation
+    input:
+      candidates: "{{ gather_candidates.output }}"
+      fan_profile: "{{ session.fan_profile }}"
+      request_type: "{{ classify_request.label }}"
+
+  - id: attach_directions
+    call_workflow: navigation_flow
+    input:
+      message: "directions to {{ apply_recommendation_skill.top_choice }}"
+      session: "{{ session }}"
+
+outputs:
+  reply: "{{ apply_recommendation_skill.output }} {{ attach_directions.reply }}"
+
+guardrails:
+  - never invent a vendor or menu item not present in map data
+  - disclose when a suggestion is general (not confirmed) vs. map-confirmed
+  - cap to top 2-3 suggestions, ranked by walking distance

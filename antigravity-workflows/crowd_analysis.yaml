@@ -1,0 +1,61 @@
+workflow: crowd_analysis
+description: >
+  Turns raw live crowd-density feed readings into zone-level status using
+  the same gate/amenity clusters defined in the Plaza Level map, and
+  produces load-balancing suggestions for staff.
+trigger:
+  called_by: [staff_assistant, staff skill]
+  schedule: also runs on a 2-minute interval during live events
+
+inputs:
+  zone: optional  # if omitted, analyze all zones
+
+data:
+  map: data/plaza_level_map.json
+  live_feed: external.crowd_density_feed
+
+steps:
+  - id: define_zones
+    type: transform
+    description: >
+      Group the map's gates + nearby amenities into 5 concourse zones,
+      one per gate (amex, hcltech, verizon, metlife, moodys), plus the
+      east_vip / west_vip clusters as sub-zones.
+    input: "{{ data.map.gates }}"
+
+  - id: pull_density
+    type: fetch
+    source: "{{ data.live_feed }}"
+    filter: "{{ zone | default: 'all' }}"
+    on_unavailable:
+      type: flag
+      message: "live feed unavailable — do not report estimated numbers"
+
+  - id: classify_status
+    type: transform
+    thresholds:
+      low: "< 40% capacity"
+      moderate: "40-70% capacity"
+      high: "70-90% capacity"
+      critical: "> 90% capacity"
+    input: "{{ pull_density.output }}"
+
+  - id: suggest_redirects
+    type: rule_engine
+    condition: "any zone classified 'high' or 'critical'"
+    rules:
+      - find nearest zone classified 'low' or 'moderate' using
+        data.map gate adjacency (amex<->hcltech, hcltech<->verizon,
+        verizon<->metlife, metlife<->moodys, moodys<->amex)
+      - suggest that zone as an overflow redirect, referencing the
+        specific amenity type that's congested (restroom, bag check,
+        escalator, etc.)
+
+outputs:
+  zone_status: "{{ classify_status.output }}"
+  redirect_suggestions: "{{ suggest_redirects.output }}"
+
+error_handling:
+  - if: pull_density fails
+    type: staff_notice
+    content: "Crowd feed offline — falling back to manual reports only."

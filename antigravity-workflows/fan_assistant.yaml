@@ -1,0 +1,67 @@
+workflow: fan_assistant
+description: >
+  Top-level orchestrator for the AI Chat surface. Classifies every fan
+  message and routes it to the correct sub-workflow / skill, with
+  emergency intent always short-circuiting to the top.
+trigger:
+  source: AI Chat
+  on: message_received
+
+inputs:
+  message: string
+  session:
+    fan_profile: optional      # favorite team, dietary prefs, accessibility needs
+    current_location: optional # gate name or section number, if known
+
+steps:
+  - id: classify_intent
+    type: intent_classifier
+    input: "{{ message }}"
+    labels:
+      - emergency
+      - navigation
+      - football
+      - recommendation
+      - small_talk
+    priority_override:
+      # emergency always wins regardless of classifier confidence
+      - if: "contains_distress_or_safety_language(message)"
+        force_label: emergency
+
+  - id: route
+    type: branch
+    on: "{{ classify_intent.label }}"
+    branches:
+      emergency:
+        call_workflow: emergency_flow
+        pass: [message, session]
+      navigation:
+        call_workflow: navigation_flow
+        pass: [message, session]
+      football:
+        skill: football
+        pass: [message]
+      recommendation:
+        call_workflow: recommendation_flow
+        pass: [message, session]
+      small_talk:
+        type: direct_reply
+        style: friendly, brief, offer to help with directions/food/game info
+
+  - id: log_interaction
+    type: analytics_log
+    input:
+      intent: "{{ classify_intent.label }}"
+      resolved: "{{ route.success }}"
+    # anonymous, aggregate only — never logs fan identity or exact quotes
+
+outputs:
+  reply: "{{ route.output }}"
+
+fallback:
+  - if: no_branch_matched
+    type: direct_reply
+    content: >
+      I can help you find something on the concourse, check the score,
+      get a food/merch suggestion, or get help fast if something's wrong.
+      What do you need?
